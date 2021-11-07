@@ -47,8 +47,7 @@ func (collector *currentCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (collector *currentCollector) Collect(ch chan<- prometheus.Metric) {
 	// Get list of appliances
-	// TODO: Add label filter later
-	req, _ := http.NewRequest("GET", url+"/~"+path+"?fu=1&ty=3", nil)
+	req, _ := http.NewRequest("GET", url+"/~"+path+"?fu=1&ty=3&lbl=Type/appliance", nil)
 	req.Header.Set("X-M2M-Origin", username+":"+password)
 	req.Header.Set("Content-Type", "application/json")
 
