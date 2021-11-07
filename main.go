@@ -5,6 +5,7 @@ import (
 	"flag"
 	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +19,7 @@ var url string
 var path string
 var username string
 var password string
-var lastCollectedTs time.Time
+var timezone string
 var client *http.Client
 
 type currentCollector struct {
@@ -47,7 +48,7 @@ func (collector *currentCollector) Describe(ch chan<- *prometheus.Desc) {
 func (collector *currentCollector) Collect(ch chan<- prometheus.Metric) {
 	// Get list of appliances
 	// TODO: Add label filter later
-	req, _ := http.NewRequest("GET", url+"/~"+path+"?fu=1", nil)
+	req, _ := http.NewRequest("GET", url+"/~"+path+"?fu=1&ty=3", nil)
 	req.Header.Set("X-M2M-Origin", username+":"+password)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -82,22 +83,12 @@ func (collector *currentCollector) Collect(ch chan<- prometheus.Metric) {
 		labels[i] = strings.ReplaceAll(endpoints[i].(string), path+"/", "")
 	}
 
-	applianceStatus := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "appliance_count",
-	}, []string{"appliance"})
-
 	ch <- prometheus.MustNewConstMetric(collector.applianceCount,
 		prometheus.GaugeValue, float64(len(endpoints)))
 
 	for i := 0; i < len(labels); i += 1 {
-		applianceStatus.With(prometheus.Labels{"appliance": labels[i]}).Set(1)
-		ch <- prometheus.MustNewConstMetric(collector.applianceStatus,
-			prometheus.GaugeValue, float64(i), labels[i])
-		ch <- prometheus.MustNewConstMetric(collector.applianceConsumption,
-			prometheus.GaugeValue, float64(i), labels[i])
-
 		// Get last value
-		req, _ := http.NewRequest("GET", url+"/~"+path+labels[i]+"/", nil)
+		req, _ := http.NewRequest("GET", url+"/~"+path+"/"+labels[i]+"/la", nil)
 		req.Header.Set("X-M2M-Origin", username+":"+password)
 		req.Header.Set("Content-Type", "application/json")
 
@@ -108,30 +99,59 @@ func (collector *currentCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		if resp.StatusCode != 200 {
-			log.Errorf("Error while fetching list of appliances: %s", resp.Status)
+			if resp.StatusCode == 404 {
+				ch <- prometheus.MustNewConstMetric(collector.applianceStatus,
+					prometheus.GaugeValue, 0, labels[i])
+				ch <- prometheus.MustNewConstMetric(collector.applianceConsumption,
+					prometheus.GaugeValue, 0, labels[i])
+			} else {
+				log.Errorf("Error while fetching last value for %s: %s", labels[i], resp.Status)
+			}
+			continue
 		}
 
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			log.Errorf("Error while reading list of appliances: %v", err)
+			log.Errorf("Error while reading last value for %s: %v", labels[i], err)
+			continue
 		}
 
 		// Read JSON into map[string]interface{}, ideally we should have a correct type defined
 		res := make(map[string]interface{})
 		err = json.Unmarshal(body, &res)
 		if err != nil {
-			log.Errorf("Error while reading list of appliances: %v", err)
+			log.Errorf("Error while reading last value for %s: %v", labels[i], err)
+			continue
+		}
+
+		tz, _ := time.LoadLocation(timezone)
+		ct, _ := time.ParseInLocation("20060102T150405",
+			res["m2m:cin"].(map[string]interface{})["ct"].(string), tz)
+		con, _ := strconv.ParseFloat(res["m2m:cin"].(map[string]interface{})["con"].(string), 64)
+
+		// Time elapsed is more than the interval, so assume that the appliance is off
+		if time.Since(ct) > interval {
+			ch <- prometheus.MustNewConstMetric(collector.applianceStatus,
+				prometheus.GaugeValue, 0, labels[i])
+			ch <- prometheus.MustNewConstMetric(collector.applianceConsumption,
+				prometheus.GaugeValue, 0, labels[i])
+		} else {
+			ch <- prometheus.MustNewConstMetric(collector.applianceStatus,
+				prometheus.GaugeValue, 1, labels[i])
+			ch <- prometheus.MustNewConstMetric(collector.applianceConsumption,
+				prometheus.GaugeValue, con, labels[i])
 		}
 	}
 }
 
 func main() {
-	flag.DurationVar(&interval, "interval", 30, "The interval at which to probe the OneM2M endpoint. "+
+	flag.DurationVar(&interval, "interval", 30*time.Second, "The interval at which to probe the OneM2M endpoint. "+
 		"If the latest data point is older than the interval then the endpoint is assumed to be dead.")
 	flag.StringVar(&url, "url", "", "The URL of the base OneM2M endpoint.")
 	flag.StringVar(&path, "path", "", "The path to the base data container.")
 	flag.StringVar(&username, "username", "", "The username to access the OneM2M endpoint.")
 	flag.StringVar(&password, "password", "", "The password to access the OneM2M endpoint.")
+	flag.StringVar(&timezone, "timezone", "Asia/Kolkata", "The timezone where the appliances are located.")
 	flag.Parse()
 
 	collector := newCurrentCollector()
@@ -140,5 +160,7 @@ func main() {
 	client = &http.Client{}
 
 	http.Handle("/metrics", promhttp.Handler())
-	http.ListenAndServe(":9876", nil)
+
+	log.Info("Started serving at localhost:9876/metrics")
+	log.Fatal(http.ListenAndServe(":9876", nil))
 }
