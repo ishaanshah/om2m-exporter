@@ -20,12 +20,21 @@ var path string
 var username string
 var password string
 var timezone string
+var key int
 var client *http.Client
 
 type currentCollector struct {
 	applianceCount       *prometheus.Desc
 	applianceStatus      *prometheus.Desc
 	applianceConsumption *prometheus.Desc
+}
+
+func Decrypt(key int, ct string) string {
+	str := make([]byte, len(ct))
+	for i := 0; i < len(str); i++ {
+		str[i] = ct[i] - byte(key)
+	}
+	return string(str)
 }
 
 func newCurrentCollector() *currentCollector {
@@ -126,7 +135,9 @@ func (collector *currentCollector) Collect(ch chan<- prometheus.Metric) {
 		tz, _ := time.LoadLocation(timezone)
 		ct, _ := time.ParseInLocation("20060102T150405",
 			res["m2m:cin"].(map[string]interface{})["ct"].(string), tz)
-		con, _ := strconv.ParseFloat(res["m2m:cin"].(map[string]interface{})["con"].(string), 64)
+		encrypted_con := res["m2m:cin"].(map[string]interface{})["con"].(string)
+		decrypted_con := Decrypt(key, encrypted_con)
+		con, _ := strconv.ParseFloat(decrypted_con, 64)
 
 		// Time elapsed is more than the interval, so assume that the appliance is off
 		if time.Since(ct) > interval {
@@ -151,6 +162,7 @@ func main() {
 	flag.StringVar(&username, "username", "", "The username to access the OneM2M endpoint.")
 	flag.StringVar(&password, "password", "", "The password to access the OneM2M endpoint.")
 	flag.StringVar(&timezone, "timezone", "Asia/Kolkata", "The timezone where the appliances are located.")
+	flag.IntVar(&key, "key", 69, "The key for decrypting the data.")
 	flag.Parse()
 
 	collector := newCurrentCollector()
